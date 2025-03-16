@@ -52,7 +52,7 @@ def apply_rotary(x, cos, sin, rope_dim):
     x_rotated = torch.stack([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1).reshape(*x.shape[:-1], rope_dim)
     return torch.cat([x_rotated, x[..., rope_dim:]], dim=-1)
 
-def RotaryEmbedding(q, k, rope_dim):
+def rotary_embedding(q, k, rope_dim):
     B, num_heads, T, _ = q.shape
     theta = torch.arange(0, rope_dim, 2, dtype=q.dtype, device=q.device) / rope_dim
     inv_freq = 1.0 / (10000 ** theta)
@@ -121,25 +121,22 @@ class SelfAttention(nn.Module):
         self.qkv_proj = nn.Linear(config.hidden_size, self.num_heads * self.head_dim * 3)
         self.out_proj = nn.Linear(self.num_heads * self.head_dim, config.hidden_size)
         self.attn_dropout = nn.Dropout(config.dropout)
-        self.global_token_indices = global_token_indices
         self.allow_global_bidirectional = allow_global_bidirectional
+        self.global_token_indices = global_token_indices if global_token_indices is not None else [2, 3, 4, 5]
         nn.init.xavier_normal_(self.qkv_proj.weight)
         nn.init.constant_(self.qkv_proj.bias, 0)
 
     def forward(self, x, mask=None):
         B, T, _ = x.shape
         qkv = self.qkv_proj(x)
-        q, k, v = [t.view(B, T, self.num_heads, self.head_dim).transpose(1, 2) for t in torch.chunk(qkv, 3, dim=-1)]
+        q, k, v = [t.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+                   for t in torch.chunk(qkv, 3, dim=-1)]
         if self.rope_dim > 0:
-            q, k = RotaryEmbedding(q, k, self.rope_dim)
-        if self.global_token_indices is None:
-            global_mask = torch.zeros(T, dtype=torch.bool, device=x.device)
-            global_mask[0] = True
-        elif not torch.is_tensor(self.global_token_indices):
-            global_mask = torch.zeros(T, dtype=torch.bool, device=x.device)
-            global_mask[self.global_token_indices] = True
-        else:
-            global_mask = self.global_token_indices
+            q, k = rotary_embedding(q, k, self.rope_dim)
+        global_mask = torch.zeros(T, dtype=torch.bool, device=x.device)
+        valid_indices = [idx for idx in self.global_token_indices if idx < T]
+        if valid_indices:
+            global_mask[valid_indices] = True
         attn_local = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         mask_val = torch.finfo(attn_local.dtype).min if attn_local.dtype == torch.float16 else -1e9
         if mask is not None:
@@ -226,12 +223,12 @@ class ChatModel(nn.Module):
 class ChatTokenizer:
     def __init__(self, vocab_path=None):
         self.vocab = {"<|padding|>": 0, "<|unknown|>": 1, "<|user|>": 2,
-        "<|think|>": 3, "<|assistant|>": 4, "<|end|>": 5, " ": 6, "\\n": 7}
+        "<|think|>": 3,  "<|assistant|>": 4, "<|end|>": 5, " ": 6, "\\n": 7}
         self.special_tokens = sorted(self.vocab.keys(), key=lambda k: self.vocab[k])
         self.pattern = re.compile(
             f'({"|".join(map(re.escape, self.special_tokens))})'
             r'|([\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF\U00020000-\U0002EBEF])'
-            r'|([a-zA-Z]+)' r'|([0-9])' r'|(\s+)' r'|(_)' r'|([^\s])'
+            r'|([a-zA-Z]+)' r'|( +)' r'|([0-9])' r'|(_)' r'|([^\s])'
             r'|([!@#$%^&*()\-+=\[\]{}\\|;:\'",.<>/?`~])', re.UNICODE)
         if vocab_path and os.path.exists(vocab_path):
             self.load(vocab_path)
@@ -241,7 +238,7 @@ class ChatTokenizer:
 
     def convert_tokens_to_ids(self, tokens, update_vocab=True):
         return [self.vocab.setdefault(token, len(self.vocab)) if token not in self.vocab and update_vocab
-            else self.vocab.get(token, self.vocab["<|unknown|>"]) for token in tokens]
+                else self.vocab.get(token, self.vocab["<|unknown|>"]) for token in tokens]
 
     def build_vocab(self, texts, max_vocab_size=None):
         token_freq = Counter(token for text in texts for token in self.tokenize(text) if token not in self.special_tokens)
@@ -358,13 +355,12 @@ if __name__ == "__main__":
     tokenizer = ChatTokenizer()
     tokenizer.build_vocab(read_texts(file_data))
     config = ChatConfig(vocab_size=len(tokenizer.vocab), max_seq_length=1024)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
     model = ChatModel(config)
-
     if torch.cuda.is_available() and torch.cuda.device_count() > 1:
         device_ids = list(range(torch.cuda.device_count()))
         model = nn.DataParallel(model, device_ids=device_ids, output_device=device_ids[0])
-
-    model = model.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+    model = model.to(device)
     stage_train("Pretrain", model, tokenizer, config, file_data)
