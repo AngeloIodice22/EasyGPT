@@ -31,4 +31,4 @@ https://github.com/87owo/EasyGPT
 
 ## MIT license
 
-https://github.com/87owo/EasyGPT/blob/main/LICENSE.md
+https://github.com/87owo/EasyGPT/blob/main/LICENSE
