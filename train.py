@@ -356,7 +356,7 @@ def stage_train(stage_name, model, tokenizer, config, file_data, epochs=30, batc
         config.save_pretrained(save_path)
 
 if __name__ == "__main__":
-    file_data = "./dialogues/dialogues.txt"
+    file_data = "./data/dialogues.txt"
     tokenizer = ChatTokenizer()
     tokenizer.build_vocab(read_texts(file_data))
     config = ChatConfig(vocab_size=len(tokenizer.vocab), max_seq_length=1024)
