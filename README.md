@@ -4,7 +4,7 @@ Easily train and inference on your personal computer, no need for large scale cl
 
 ## Requirements
 
-Note: You need to select the appropriate command according to the system and CUDA version.
+You need to select the appropriate command according to the system and CUDA version.
 
 ```
 pip install torch
