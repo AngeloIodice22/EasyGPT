@@ -181,14 +181,13 @@ class ChatModel(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.embed = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.pos_encoder = PositionalEncoding(config.hidden_size, config.max_seq_length, config.dropout)
         self.blocks = nn.ModuleList([TransformerBlock(config) for _ in range(config.num_layers)])
         self.norm = nn.LayerNorm(config.hidden_size, eps=1e-5)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size)
         self.config = config
 
     def forward(self, input_ids, attention_mask=None, labels=None):
-        x = self.pos_encoder(self.embed(input_ids))
+        x = self.embed(input_ids)
         B, T, _ = x.size()
         causal_mask = PositionalEncoding.get_adaptive_causal_mask(T, self.config.window_size, x.device)
         causal_mask = causal_mask.unsqueeze(0).unsqueeze(1)
@@ -197,7 +196,6 @@ class ChatModel(nn.Module):
             mask = causal_mask | pad_mask
         else:
             mask = causal_mask
-
         moe_losses = 0
         for block in self.blocks:
             x, loss = block(x, mask)
@@ -365,9 +363,8 @@ if __name__ == "__main__":
     model = ChatModel(config)
 
     if torch.cuda.is_available() and torch.cuda.device_count() > 1:
-        torch.cuda.set_device(0)
-        model = nn.DataParallel(model, device_ids=[0, 1], output_device=0)
-        model.module.embed = model.module.embed.to(0)
+        device_ids = list(range(torch.cuda.device_count()))
+        model = nn.DataParallel(model, device_ids=device_ids, output_device=device_ids[0])
 
     model = model.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
     stage_train("Pretrain", model, tokenizer, config, file_data)
