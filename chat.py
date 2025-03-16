@@ -1,11 +1,11 @@
 import torch
-from train import *
+from train import ChatConfig, ChatModel, ChatTokenizer
 
 def load_model_and_tokenizer(model_path):
     config = ChatConfig.from_pretrained(model_path)
     model = ChatModel.from_pretrained(model_path, config)
     tokenizer = ChatTokenizer.from_pretrained(model_path)
-    device = torch.device("cpu")#("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu")
     model.to(device)
     model.eval()
     return model, tokenizer, device
@@ -21,9 +21,7 @@ def chat(text, model, tokenizer, device, max_length=1024, temperature=0.7, top_p
             logits = outputs["logits"][0, -1, :]
 
             for token in set(generated.squeeze().tolist()):
-                logits[token] /= repetition_penalty
-            for token in set(generated.squeeze().tolist()):
-                logits[token] -= presence_penalty
+                logits[token] = logits[token] / repetition_penalty - presence_penalty
 
             scaled_logits = logits / temperature
             sorted_logits, sorted_indices = torch.sort(scaled_logits, descending=True)
@@ -45,7 +43,7 @@ def chat(text, model, tokenizer, device, max_length=1024, temperature=0.7, top_p
             if token_str == "<|end|>":
                 break
             elif token_str == "\\n":
-                print("\n", end='')
+                print()
             else:
                 print(token_str, end='', flush=True)
 
@@ -58,4 +56,4 @@ if __name__ == "__main__":
         if text.strip().lower() == "exit":
             break
         chat(text, model, tokenizer, device)
-        print("\n")
+        print()
