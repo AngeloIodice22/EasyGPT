@@ -1,8 +1,8 @@
 import os, re, math, json, torch
 import torch.nn.functional as F
 from collections import Counter
+from bitsandbytes.optim import Adam8bit
 from torch.utils.data import Dataset, DataLoader, Subset
-from torch.utils.checkpoint import checkpoint
 from safetensors.torch import save_file, load_file
 from torch import nn
 from tqdm import tqdm
@@ -23,8 +23,8 @@ def read_texts(file_path):
 
 # === 配置類 ===
 class ChatConfig:
-    def __init__(self, vocab_size, max_seq_length, hidden_size=256, num_layers=4, num_heads=8, rope_dim=32, 
-            feed_forward_dim=640, window_size=512, dropout=0.1, num_experts=4, expert_loss_weight=0.01):
+    def __init__(self, vocab_size, max_seq_length, hidden_size=384, num_layers=3, num_heads=6, rope_dim=64, 
+            feed_forward_dim=960, window_size=512, dropout=0.1, num_experts=4, expert_loss_weight=0.01):
         self.vocab_size = vocab_size
         self.max_seq_length = max_seq_length
         self.hidden_size = hidden_size
@@ -124,7 +124,6 @@ class SelfAttention(nn.Module):
         self.allow_global_bidirectional = allow_global_bidirectional
         self.global_token_indices = global_token_indices if global_token_indices is not None else [2, 3, 4, 5]
         nn.init.xavier_normal_(self.qkv_proj.weight)
-        nn.init.constant_(self.qkv_proj.bias, 0)
 
     def forward(self, x, mask=None):
         B, T, _ = x.shape
@@ -159,9 +158,9 @@ class SelfAttention(nn.Module):
 class TransformerBlock(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.norm1 = nn.LayerNorm(config.hidden_size, eps=1e-5)
+        self.norm1 = nn.LayerNorm(config.hidden_size)
         self.self_attn = SelfAttention(config)
-        self.norm2 = nn.LayerNorm(config.hidden_size, eps=1e-5)
+        self.norm2 = nn.LayerNorm(config.hidden_size)
         self.ffn = MoEFeedForward(config.hidden_size, config.feed_forward_dim, config.dropout, config.num_experts)
         self.dropout = nn.Dropout(config.dropout)
 
@@ -171,7 +170,7 @@ class TransformerBlock(nn.Module):
         return x + self.dropout(ffn_out), moe_loss
 
     def forward(self, x, mask=None):
-        return checkpoint(self._forward_impl, x, mask, use_reentrant=False)
+        return self._forward_impl(x, mask)
 
 # === 聊天模型 ===
 class ChatModel(nn.Module):
@@ -179,7 +178,7 @@ class ChatModel(nn.Module):
         super().__init__()
         self.embed = nn.Embedding(config.vocab_size, config.hidden_size)
         self.blocks = nn.ModuleList([TransformerBlock(config) for _ in range(config.num_layers)])
-        self.norm = nn.LayerNorm(config.hidden_size, eps=1e-5)
+        self.norm = nn.LayerNorm(config.hidden_size)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size)
         self.config = config
 
@@ -223,12 +222,12 @@ class ChatModel(nn.Module):
 class ChatTokenizer:
     def __init__(self, vocab_path=None):
         self.vocab = {"<|padding|>": 0, "<|unknown|>": 1, "<|user|>": 2,
-        "<|think|>": 3,  "<|assistant|>": 4, "<|end|>": 5, " ": 6, "\\n": 7}
+            "<|think|>": 3, "<|assistant|>": 4, "<|end|>": 5, " ": 6, "\\n": 7}
         self.special_tokens = sorted(self.vocab.keys(), key=lambda k: self.vocab[k])
         self.pattern = re.compile(
             f'({"|".join(map(re.escape, self.special_tokens))})'
             r'|([\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF\U00020000-\U0002EBEF])'
-            r'|([a-zA-Z]+)' r'|( +)' r'|([0-9])' r'|(_)' r'|([^\s])'
+            r'|([a-zA-Z]+)|( +)|([0-9])|(_)|([^\s])'
             r'|([!@#$%^&*()\-+=\[\]{}\\|;:\'",.<>/?`~])', re.UNICODE)
         if vocab_path and os.path.exists(vocab_path):
             self.load(vocab_path)
@@ -290,7 +289,7 @@ class ChatDataset(Dataset):
             "labels": input_ids[1:]}
 
 # === 訓練週期 ===
-def run_epoch(model, data_loader, device, pad_id, desc, optimizer=None, accum_steps=2):
+def run_epoch(model, data_loader, device, pad_id, desc, optimizer=None, accum_steps=1):
     total_loss, total_correct, total_tokens = 0, 0, 0
     scaler = torch.amp.GradScaler() if optimizer is not None else None
     for step, batch in enumerate(tqdm(data_loader, desc=desc, leave=False)):
@@ -318,7 +317,7 @@ def run_epoch(model, data_loader, device, pad_id, desc, optimizer=None, accum_st
     return total_loss / len(data_loader), total_correct / total_tokens if total_tokens > 0 else 0
 
 # === 訓練階段 ===
-def stage_train(stage_name, model, tokenizer, config, file_data, epochs=30, batch_size=4, val_split=0.1):
+def stage_train(stage_name, model, tokenizer, config, file_data, epochs=30, batch_size=3, val_split=0.1):
     bs = batch_size * (torch.cuda.device_count() if torch.cuda.is_available() else 1)
     texts = read_texts(file_data)
     dataset = ChatDataset(tokenizer, config.max_seq_length, texts)
@@ -331,19 +330,19 @@ def stage_train(stage_name, model, tokenizer, config, file_data, epochs=30, batc
     num_workers=num_workers, pin_memory=True, pin_memory_device=str(device), prefetch_factor=3)
     val_loader = DataLoader(val_data, batch_size=bs, shuffle=False, persistent_workers=True,
     num_workers=num_workers, pin_memory=True, pin_memory_device=str(device), prefetch_factor=3)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.1, betas=(0.9, 0.999))
+    optimizer = Adam8bit(model.parameters(), lr=1e-3, weight_decay=0.1, betas=(0.9, 0.999))
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
     pad_id = tokenizer.vocab["<|padding|>"]
 
     for epoch in range(epochs):
         model.train()
         ep_str = f"{stage_name} EP: {epoch+1}/{epochs}"
-        train_loss, train_acc = run_epoch(model, train_loader, device, pad_id, f"{ep_str}, Training", optimizer)
+        tl, ta = run_epoch(model, train_loader, device, pad_id, f"{ep_str}, Training", optimizer)
         model.eval()
-        val_loss, val_acc = run_epoch(model, val_loader, device, pad_id, f"{ep_str}, Validation")
-        scheduler.step(val_loss)
-        current_lr = optimizer.param_groups[0]['lr']
-        print(f"{ep_str}, LR: {current_lr:.6f}, TL: {train_loss:.6f}, TA: {train_acc:.6f}, VL: {val_loss:.6f}, VA: {val_acc:.6f}")
+        vl, va = run_epoch(model, val_loader, device, pad_id, f"{ep_str}, Validation")
+        scheduler.step(vl)
+        lr = optimizer.param_groups[0]['lr']
+        print(f"{ep_str}, LR: {lr:.6f}, TL: {tl:.6f}, TA: {ta:.6f}, VL: {vl:.6f}, VA: {va:.6f}")
         save_path = os.path.join("./model", f"{stage_name}_epoch_{epoch+1}")
         os.makedirs(save_path, exist_ok=True)
         model.save_pretrained(save_path)
